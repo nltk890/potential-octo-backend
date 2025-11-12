@@ -48,14 +48,14 @@ chunks = list(collection.find({}))
 
 if os.path.exists(faiss_index_path)
     faiss_index = faiss.read_index(faiss_index_path)
-    print(✅ FAISS index loaded)
+    print(FAISS index loaded)
 else    
     embeddings = np.array([chunk[embedding] for chunk in chunks], dtype=float32)
     faiss_index = faiss.IndexFlatIP(DIM)
     faiss.normalize_L2(embeddings)
     faiss_index.add(embeddings)
     faiss.write_index(faiss_index_path)
-    print(f✅ FAISS index created with {len(chunks)} vectors)
+    print(f FAISS index created with {len(chunks)} vectors)
 
 id_map = [chunk[_id] for chunk in chunks]
 
@@ -154,4 +154,5 @@ async def query_endpoint(request QueryRequest)
     except Exception as e
         import traceback
         traceback.print_exc()
+
         raise HTTPException(status_code=500, detail=str(e))
