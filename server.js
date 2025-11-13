@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { MongoClient } from "mongodb";
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
+import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -21,7 +21,7 @@ const {
 if (!MONGO_URI || !GEMINI_API_KEY || !MONGO_DB || !MONGO_COLLECTION || !VECTOR_SEARCH_INDEX_NAME) {
   console.error("❌ Fatal Error: Missing required environment variables!");
   console.error("Please check MONGO_URI, MONGO_DB, MONGO_COLLECTION, GEMINI_API_KEY, and VECTOR_SEARCH_INDEX_NAME.");
-  process.exit(1); // Exit the process with an error code
+  process.exit(1);
 }
 
 // -----------------------------
@@ -30,10 +30,9 @@ if (!MONGO_URI || !GEMINI_API_KEY || !MONGO_DB || !MONGO_COLLECTION || !VECTOR_S
 const app = express();
 app.use(express.json());
 
-// A flexible CORS setup for production and development
 const corsOptions = {
-  origin: ALLOWED_ORIGIN, // Fallback to allow all, but ALLOWED_ORIGIN is safer
-  methods: ["POST", "GET"],
+  origin: ALLOWED_ORIGIN,
+  methods: ["POST","GET"],
   credentials: true,
 };
 app.use(cors(corsOptions));
@@ -46,21 +45,18 @@ const client = new MongoClient(MONGO_URI);
 let collection;
 
 async function connectDB() {
-  // This will throw an error if connection fails, which will be caught by startServer
   await client.connect();
   const db = client.db(MONGO_DB);
   collection = db.collection(MONGO_COLLECTION);
-  console.log("Connected to MongoDB Atlas");
+  console.log("Connected to MongoDB");
 }
 
 // -----------------------------
-// Gemini API setup
+// Google Gen AI SDK setup
 // -----------------------------
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-// Strictly using the models you requested
-const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
-const chatModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-console.log("Gemini AI models initialized");
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+
+console.log("Google Gen AI client initialized");
 
 // -----------------------------
 // Utility: sanitize user input
@@ -77,42 +73,41 @@ function sanitizeInput(text) {
 // -----------------------------
 // API endpoints
 // -----------------------------
-app.get("/", (req, res) => {
-  res.send("Shadows Fate AI server is running!");
+app.get("/", (_req, res) => {
+  res.send("Shadows Fate AI server is running! Go back Nothing here");
 });
 
 app.post("/query", async (req, res) => {
   try {
-    const userQuery = sanitizeInput(req.body.query || "");
+    const userQuery = sanitizeInput(req.body.query);
     if (!userQuery) {
       console.log("Empty query received.");
       return res.status(400).json({ error: "Empty query." });
     }
     console.log(`Processing query: "${userQuery}"`);
 
-    // --- 1. Embed query (with new timeout and logging) ---
-    console.log("1. Starting to embed query...");
-    let embedding;
-    try {
-      const { embedding: resultEmbedding } = await embeddingModel.embedContent(
-        userQuery,
-        { requestOptions: { timeout: 30000 } } // 30-second timeout
-      );
-      embedding = resultEmbedding;
-    } catch (err) {
-      console.error("❌ Error during embedding:", err.message, err.name);
-      // err.name might be 'TimeoutError'
-      throw new Error(`Failed to embed query: ${err.name} - ${err.message}`);
+    // --- 1. Embed the query using the embedContent method ---
+    console.log("1. Embedding query...");
+    const embedResp = await ai.models.embedContent({
+      model: "gemini-embedding-001",
+      contents: userQuery,
+      // optional requestOptions, e.g. timeout
+      requestOptions: { timeout: 30000 }
+    });
+    const queryEmbedding = embedResp.embeddings?.[0]?.values;
+    if (!Array.isArray(queryEmbedding) || queryEmbedding.length === 0) { 
+      console.error("--- DEBUG: EMBEDDING RESPONSE MISSING VALUES ---"); 
+      throw new Error("Embedding failed: the response contained an empty or invalid embedding vector. Please check the raw response above for API error messages.");
     }
     console.log("2. Embedding successful.");
 
-    // 2. Perform vector search
+    // --- 2. Vector search in MongoDB ---
     const aggPipeline = [
       {
         $vectorSearch: {
           index: VECTOR_SEARCH_INDEX_NAME,
           path: "embedding",
-          queryVector: embedding.values,
+          queryVector: queryEmbedding,
           numCandidates: 200,
           limit: 5
         }
@@ -126,84 +121,66 @@ app.post("/query", async (req, res) => {
         }
       }
     ];
-
     const docs = await collection.aggregate(aggPipeline).toArray();
-    
-    let context; // Define context outside the if/else
 
+    let context;
+    
     if (!docs.length) {
-      console.log("No relevant documents found. Sending query to LLM without context.");
-      context = "No relevant context was found in the database to answer the query."; // Provide an empty context
+      console.log("No relevant documents found. Proceeding without context.");
+      context = "";
     } else {
       console.log(`Found ${docs.length} relevant documents.`);
-      // 3. Combine retrieved chunks
-      context = docs.map((d, i) => `Source ${i + 1} (Score: ${d.score.toFixed(2)}): ${d.text}`).join("\n\n");
+      context = docs.map((d,i) => `Source ${i+1} (Score: ${d.score.toFixed(2)}): ${d.text}`).join("\n\n");
     }
 
-    // 4. Ask Gemini
+    // --- 3. Build prompt with RAG style ---
     const ragPrompt = `
-You are a helpful expert on the Shadow Fight game series.
-Your task is to answer the user's question based *only* on the context provided below.
-Do not use any outside knowledge. If the context does not contain the answer, say so.
+      You are a helpful expert on the Shadow Fight game series.
+      Use *only* the context below to answer. If the answer isn't in the context, say no info.
 
-**Context:**
----
-${context}
----
+      **Context:**
+      ---
+      ${context}
+      ---
 
-**User Question:**
-"${userQuery}"
+      **User Question:**
+      "${userQuery}"
+      `;
 
-**Your Answer:**
-(Provide a clear, concise answer in Markdown format, citing sources if helpful, e.g., "According to Source 1...")
-`;
-
-    // --- UPDATED API CALL (with new timeout and logging) ---
+    // --- 4. Ask the model to generate content using new style ---
+    console.log("3. Generating content...");
     const generationConfig = {
       temperature: 0.2,
       topK: 1,
-      topP: 0.9,
+      topP: 0.9
     };
 
     const safetySettings = [
       { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
       { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
       { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-      { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
+      { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
     ];
 
-    console.log("3. Starting to generate content...");
-    let llmResponse;
-    try {
-      const result = await chatModel.generateContent({
-        contents: [{ role: "user", parts: [{ text: ragPrompt }] }],
-        generationConfig,
-        safetySettings,
-      }, { requestOptions: { timeout: 30000 } }); // 30-second timeout
-
-      // Check for a valid response structure
-      if (!result.response || !result.response.candidates || !result.response.candidates[0].content.parts[0].text) {
-          console.error("❌ Error: Invalid response structure from Gemini API", JSON.stringify(result, null, 2));
-          throw new Error("Invalid response from AI model.");
-      }
-      
-      llmResponse = result.response.candidates[0].content.parts[0].text;
-
-    } catch (err) {
-      console.error("❌ Error during content generation:", err.message, err.name);
-      // err.name might be 'TimeoutError'
-      throw new Error(`Failed to generate content: ${err.name} - ${err.message}`);
+    const genResp = await ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: [{ role: "user", parts: [{ text: ragPrompt }] }],
+      generationConfig,
+      safetySettings,
+      requestOptions: { timeout: 30000 }
+    });
+    const llmResponse = genResp.text;
+    if (!llmResponse) {
+      throw new Error("Failed to generate content: no text in response");
     }
     console.log("4. Content generation successful.");
-    // --- END OF UPDATE ---
 
     console.log("Sending LLM response.");
-    console.log(llmResponse)
     res.json({ response: llmResponse });
 
   } catch (err) {
-    console.error("❌ Error in /query endpoint:", err.message); // Simplified stack logging
-    res.status(500).json({ error: "An error occurred while processing the query." });
+    console.error("❌ Error in /query endpoint:", err.message);
+    res.status(500).json({ error: "An error occurred while processing the query."});
   }
 });
 
@@ -212,19 +189,15 @@ ${context}
 // -----------------------------
 async function startServer() {
   try {
-    // 1. Connect to the database
     await connectDB();
-    
-    // 2. Start the Express server *only after* DB is connected
     const port = PORT || 8000;
     app.listen(port, "0.0.0.0", () => {
       console.log(`🚀 Server listening on http://0.0.0.0:${port}`);
     });
   } catch (err) {
-    console.error("❌ Failed to start the server:", err.message, err.stack);
-    process.exit(1); // Exit process with failure
+    console.error("❌ Failed to start the server:", err.message);
+    process.exit(1);
   }
 }
 
-// Start the server
 startServer();
