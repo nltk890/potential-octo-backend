@@ -32,7 +32,7 @@ app.use(express.json());
 
 // A flexible CORS setup for production and development
 const corsOptions = {
-  origin: ALLOWED_ORIGIN || "*", // Fallback to allow all, but ALLOWED_ORIGIN is safer
+  origin: ALLOWED_ORIGIN, // Fallback to allow all, but ALLOWED_ORIGIN is safer
   methods: ["POST", "GET"],
   credentials: true,
 };
@@ -57,8 +57,9 @@ async function connectDB() {
 // Gemini API setup
 // -----------------------------
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" }); // Adjusted model name
-const chatModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" }); // Adjusted to a common flash model
+// Strictly using the models you requested
+const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
+const chatModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 console.log("Gemini AI models initialized");
 
 // -----------------------------
@@ -89,8 +90,21 @@ app.post("/query", async (req, res) => {
     }
     console.log(`Processing query: "${userQuery}"`);
 
-    // 1. Embed query
-    const { embedding } = await embeddingModel.embedContent(userQuery);
+    // --- 1. Embed query (with new timeout and logging) ---
+    console.log("1. Starting to embed query...");
+    let embedding;
+    try {
+      const { embedding: resultEmbedding } = await embeddingModel.embedContent(
+        userQuery,
+        { requestOptions: { timeout: 30000 } } // 30-second timeout
+      );
+      embedding = resultEmbedding;
+    } catch (err) {
+      console.error("❌ Error during embedding:", err.message, err.name);
+      // err.name might be 'TimeoutError'
+      throw new Error(`Failed to embed query: ${err.name} - ${err.message}`);
+    }
+    console.log("2. Embedding successful.");
 
     // 2. Perform vector search
     const aggPipeline = [
@@ -127,20 +141,6 @@ app.post("/query", async (req, res) => {
     }
 
     // 4. Ask Gemini
-    const chat = chatModel.startChat({
-      generationConfig: {
-        temperature: 0.2,
-        topK: 1,
-        topP: 0.9,
-      },
-      safetySettings: [
-        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
-      ],
-    });
-
     const ragPrompt = `
 You are a helpful expert on the Shadow Fight game series.
 Your task is to answer the user's question based *only* on the context provided below.
@@ -158,13 +158,51 @@ ${context}
 (Provide a clear, concise answer in Markdown format, citing sources if helpful, e.g., "According to Source 1...")
 `;
 
-    const result = await chat.sendMessage(ragPrompt);
-    const llmResponse = result.response.text();
+    // --- UPDATED API CALL (with new timeout and logging) ---
+    const generationConfig = {
+      temperature: 0.2,
+      topK: 1,
+      topP: 0.9,
+    };
+
+    const safetySettings = [
+      { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+      { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+      { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+      { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
+    ];
+
+    console.log("3. Starting to generate content...");
+    let llmResponse;
+    try {
+      const result = await chatModel.generateContent({
+        contents: [{ role: "user", parts: [{ text: ragPrompt }] }],
+        generationConfig,
+        safetySettings,
+      }, { requestOptions: { timeout: 30000 } }); // 30-second timeout
+
+      // Check for a valid response structure
+      if (!result.response || !result.response.candidates || !result.response.candidates[0].content.parts[0].text) {
+          console.error("❌ Error: Invalid response structure from Gemini API", JSON.stringify(result, null, 2));
+          throw new Error("Invalid response from AI model.");
+      }
+      
+      llmResponse = result.response.candidates[0].content.parts[0].text;
+
+    } catch (err) {
+      console.error("❌ Error during content generation:", err.message, err.name);
+      // err.name might be 'TimeoutError'
+      throw new Error(`Failed to generate content: ${err.name} - ${err.message}`);
+    }
+    console.log("4. Content generation successful.");
+    // --- END OF UPDATE ---
+
     console.log("Sending LLM response.");
+    console.log(llmResponse)
     res.json({ response: llmResponse });
 
   } catch (err) {
-    console.error("❌ Error in /query endpoint:", err.message, err.stack);
+    console.error("❌ Error in /query endpoint:", err.message); // Simplified stack logging
     res.status(500).json({ error: "An error occurred while processing the query." });
   }
 });
@@ -190,4 +228,3 @@ async function startServer() {
 
 // Start the server
 startServer();
-
