@@ -57,7 +57,7 @@ async function connectDB() {
 // Gemini API setup
 // -----------------------------
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const embeddingModel = genAI.getGenerativeModel({ model: "embedding-001" }); // Adjusted model name
+const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" }); // Adjusted model name
 const chatModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); // Adjusted to a common flash model
 console.log("Gemini AI models initialized");
 
@@ -188,3 +188,4 @@ async function startServer() {
 
 // Start the server
 startServer();
+
