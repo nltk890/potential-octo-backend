@@ -1,136 +1,158 @@
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import { MongoClient } from "mongodb";
-import axios from "axios";
-import { sanitizeInput } from "./utils/sanitize.js";
-
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
+import dotenv from "dotenv";
 dotenv.config();
 
-const app = express();
-app.use(express.json());
+// -----------------------------
+// Environment variables
+// -----------------------------
+const {
+  MONGO_URI,
+  MONGO_DB,
+  MONGO_COLLECTION,
+  GEMINI_API_KEY,
+  VECTOR_SEARCH_INDEX_NAME,
+  ALLOWED_ORIGIN,
+  PORT
+} = process.env;
+
+if (!MONGO_URI || !GEMINI_API_KEY)
+  throw new Error("Missing required environment variables!");
 
 // -----------------------------
-// Secure CORS
+// Express app setup
 // -----------------------------
+const app = express();
+app.use(express.json());
 app.use(
   cors({
-    origin: process.env.ALLOWED_ORIGIN,
-    methods: ["POST"],
-    allowedHeaders: ["Content-Type"],
+    origin: ALLOWED_ORIGIN,
+    methods: ["POST", "GET"],
+    credentials: true,
   })
 );
 
 // -----------------------------
-// MongoDB Connection
+// MongoDB connection
 // -----------------------------
-const client = new MongoClient(process.env.MONGO_URI);
+const client = new MongoClient(MONGO_URI);
 let collection;
 
 async function connectDB() {
   await client.connect();
-  const db = client.db(process.env.MONGO_DB);
-  collection = db.collection(process.env.MONGO_COLLECTION);
-  console.log("✅ MongoDB Connected");
+  const db = client.db(MONGO_DB);
+  collection = db.collection(MONGO_COLLECTION);
+  console.log("Connected to MongoDB Atlas");
 }
-connectDB();
+await connectDB();
 
 // -----------------------------
-// Retrieve Top K Using MongoDB Vector Search
+// Gemini API setup
 // -----------------------------
-async function retrieveTopK(queryEmbedding, topK = 5) {
-  const pipeline = [
-    {
-      $vectorSearch: {
-        index: "vector_index", // name of your vector index in Atlas
-        path: "embedding",
-        queryVector: queryEmbedding,
-        numCandidates: 100,
-        limit: topK,
-      },
-    },
-    {
-      $project: {
-        text: 1,
-        score: { $meta: "vectorSearchScore" },
-      },
-    },
-  ];
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const embeddingModel = genAI.getGenerativeModel({ model: "embedding-001" });
+const chatModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-  const results = await collection.aggregate(pipeline).toArray();
-  return results.map(r => r.text);
+// -----------------------------
+// Utility: sanitize user input
+// -----------------------------
+function sanitizeInput(text) {
+  return text
+    .replace(/<[^>]*>?/gm, "")
+    .replace(/[{}[\]();<>]/g, "")
+    .replace(/[^a-zA-Z0-9\s.,!?'-]/g, "")
+    .trim();
 }
 
 // -----------------------------
-// Generate Embedding using Gemini (or fallback model if needed)
+// API endpoint
 // -----------------------------
-async function embedText(text) {
-  try {
-    const response = await axios.post(
-      "https://generativelanguage.googleapis.com/v1beta/models/textembedding-gecko-002:embedText",
-      { text },
-      { headers: { "x-goog-api-key": process.env.GEMINI_API_KEY } }
-    );
-    return response.data.embedding.values;
-  } catch (error) {
-    console.error("Embedding error:", error.response?.data || error.message);
-    throw new Error("Failed to create embedding.");
-  }
-}
-
-// -----------------------------
-// Call Gemini API
-// -----------------------------
-async function callGemini(prompt) {
-  try {
-    const response = await axios.post(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro:generateContent",
-      {
-        contents: [{ parts: [{ text: prompt }] }],
-      },
-      { headers: { "x-goog-api-key": process.env.GEMINI_API_KEY } }
-    );
-
-    return (
-      response.data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "No response from Gemini."
-    );
-  } catch (err) {
-    console.error("Gemini API error:", err.response?.data || err.message);
-    return "Gemini API error.";
-  }
-}
-
-// -----------------------------
-// Query Endpoint
-// -----------------------------
-
-app.get("/", async (req, res) => {
-  res.json({ hello: "welcome! backend running." });
+app.get("/", (req, res) => {
+  res.send("Shadows Fate AI working on this!");
 });
 
 app.post("/query", async (req, res) => {
   try {
-    let query = sanitizeInput(req.body.query || "");
-    if (!query) return res.status(400).json({ error: "Invalid input." });
+    const userQuery = sanitizeInput(req.body.query || "");
+    if (!userQuery) return res.status(400).json({ error: "Empty query." });
 
-    const queryEmbedding = await embedText(query);
-    const topDocs = await retrieveTopK(queryEmbedding, Number(process.env.TOP_K));
-    const context = topDocs.join("\n");
+    // Embed query using Gemini
+    const { embedding } = await embeddingModel.embedContent(userQuery);
 
-    const prompt = `You are an AI assistant answering based on Shadow Fight knowledge base.
-Context:\n${context}\n\nUser: ${query}\nAnswer clearly and in a formatted way.`;
+    // Perform vector search
+    const aggPipeline = [
+      {
+        $vectorSearch: {
+          index: VECTOR_SEARCH_INDEX_NAME,
+          path: "embedding",
+          queryVector: embedding.values,
+          numCandidates: 200,
+          limit: 5
+        }
+      },
+      {
+        $project: {
+          _id: 1,
+          title: 1,
+          text: 1,
+          score: { $meta: "vectorSearchScore" }
+        }
+      }
+    ];
 
-    const responseText = await callGemini(prompt);
-    res.json({ response: responseText });
+    const docs = await collection.aggregate(aggPipeline).toArray();
+    if (!docs.length)
+      return res.status(404).json({ response: "No relevant information found." });
+
+    // Combine retrieved chunks
+    const context = docs.map((d, i) => `(${i + 1}) ${d.text}`).join("\n\n");
+
+    // Ask Gemini
+    const chat = chatModel.startChat({
+      generationConfig: {
+        temperature: 0.2,
+        topK: 1,
+        topP: 0.9,
+      },
+      safetySettings: [
+        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
+      ],
+    });
+
+    const ragPrompt = `
+You are a lore and gameplay expert of the Shadow Fight series.
+Use ONLY the following context to answer the user's question accurately.
+
+Context:
+${context}
+
+User question:
+"${userQuery}"
+
+Your answer must be:
+- Well formatted in Markdown (with bold headings, bullet points, and paragraphs)
+- Informative but concise
+- Never hallucinate or invent facts
+`;
+
+    const result = await chat.sendMessage(ragPrompt);
+    const llmResponse = result.response.text();
+
+    res.json({ response: llmResponse });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Error:", err.message);
+    res.status(500).json({ error: "An error occurred while processing the query." });
   }
 });
 
 // -----------------------------
-// Start Server
+// Server startup
 // -----------------------------
-const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+const port = PORT || 8000;
+app.listen(port, "0.0.0.0", () => console.log(`Server running on port ${port}`));
