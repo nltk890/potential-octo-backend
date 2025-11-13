@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pymongo[srv]
+python-dotenv
+sentence-transformers
+faiss-cpu
+httpx
