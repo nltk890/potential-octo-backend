@@ -180,7 +180,62 @@ app.post("/query", async (req, res) => {
 
   } catch (err) {
     console.error("❌ Error in /query endpoint:", err.message);
-    res.status(500).json({ error: "An error occurred while processing the query."});
+    //res.status(400).json({ error: "An error occurred while processing the query."});
+
+    let apiStatus = null;
+    try {
+      // The error message from the SDK often contains a JSON string of the API error
+      const errorJsonMatch = err.message.match(/(\{.*?\})/s);
+      if (errorJsonMatch && errorJsonMatch[0]) {
+        const apiError = JSON.parse(errorJsonMatch[0]);
+        // Extract the error status field from the nested JSON structure
+        apiStatus = apiError.error?.status || null;
+      }
+    } catch (parseErr) {
+      // If parsing fails, we assume it's a non-API-related error (e.g., MongoDB, network)
+      console.warn("Failed to parse error message for specific API status:", parseErr.message);
+    }
+
+    // Use a switch case on the extracted API status for specific handling
+    switch (apiStatus) {
+      case 'RESOURCE_EXHAUSTED':
+      case 'UNAVAILABLE':
+        // Handle 429 (Too Many Requests) or service unavailability
+        return res.status(429).json({
+          error: "Service Capacity Reached",
+          message: "The AI service is currently overloaded. Please try your query again in a few moments."
+        });
+
+      case 'INVALID_ARGUMENT':
+        // Handle 400 (Bad Request) - often due to malformed input or safety violations
+        return res.status(400).json({
+          error: "Invalid Request Content",
+          message: "The AI service rejected the prompt due to invalid format or safety concerns. Please refine your query."
+        });
+
+      case 'PERMISSION_DENIED':
+      case 'UNAUTHENTICATED':
+        // Handle 401/403 (Auth/API Key issue)
+        return res.status(403).json({
+          error: "Server Configuration Error",
+          message: "Authentication failed."
+        });
+
+      default:
+        // Check for manually thrown errors (like embedding failure)
+        if (err.message.includes("Embedding failed") || err.message.includes("Failed to generate content")) {
+          return res.status(500).json({
+            error: "Internal AI Processing Failure",
+            message: "Please contact the server administrator with screenshot."
+          });
+        }
+
+        // Default catch-all for unknown errors (e.g., MongoDB disconnection, network issues)
+        return res.status(500).json({
+          error: "Internal Server Error",
+          message: "An unexpected error occurred. Please try your query again after a short delay."
+        });
+    }
   }
 });
 
@@ -199,5 +254,6 @@ async function startServer() {
     process.exit(1);
   }
 }
+
 
 startServer();
