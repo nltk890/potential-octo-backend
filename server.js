@@ -52,7 +52,7 @@ await connectDB();
 // Gemini API setup
 // -----------------------------
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const embeddingModel = genAI.getGenerativeModel({ model: "embedding-001" });
+const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
 const chatModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
 // -----------------------------
@@ -155,4 +155,5 @@ Your answer must be:
 // Server startup
 // -----------------------------
 const port = PORT || 8000;
+
 app.listen(port, "0.0.0.0", () => console.log(`Server running on port ${port}`));
