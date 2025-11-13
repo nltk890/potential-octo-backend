@@ -18,21 +18,26 @@ const {
   PORT
 } = process.env;
 
-if (!MONGO_URI || !GEMINI_API_KEY)
-  throw new Error("Missing required environment variables!");
+if (!MONGO_URI || !GEMINI_API_KEY || !MONGO_DB || !MONGO_COLLECTION || !VECTOR_SEARCH_INDEX_NAME) {
+  console.error("❌ Fatal Error: Missing required environment variables!");
+  console.error("Please check MONGO_URI, MONGO_DB, MONGO_COLLECTION, GEMINI_API_KEY, and VECTOR_SEARCH_INDEX_NAME.");
+  process.exit(1); // Exit the process with an error code
+}
 
 // -----------------------------
 // Express app setup
 // -----------------------------
 const app = express();
 app.use(express.json());
-app.use(
-  cors({
-    origin: ALLOWED_ORIGIN,
-    methods: ["POST", "GET"],
-    credentials: true,
-  })
-);
+
+// A flexible CORS setup for production and development
+const corsOptions = {
+  origin: ALLOWED_ORIGIN || "*", // Fallback to allow all, but ALLOWED_ORIGIN is safer
+  methods: ["POST", "GET"],
+  credentials: true,
+};
+app.use(cors(corsOptions));
+console.log(`CORS enabled for origin: ${corsOptions.origin}`);
 
 // -----------------------------
 // MongoDB connection
@@ -41,47 +46,53 @@ const client = new MongoClient(MONGO_URI);
 let collection;
 
 async function connectDB() {
+  // This will throw an error if connection fails, which will be caught by startServer
   await client.connect();
   const db = client.db(MONGO_DB);
   collection = db.collection(MONGO_COLLECTION);
   console.log("Connected to MongoDB Atlas");
 }
-await connectDB();
 
 // -----------------------------
 // Gemini API setup
 // -----------------------------
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
-const chatModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+const embeddingModel = genAI.getGenerativeModel({ model: "embedding-001" }); // Adjusted model name
+const chatModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); // Adjusted to a common flash model
+console.log("Gemini AI models initialized");
 
 // -----------------------------
 // Utility: sanitize user input
 // -----------------------------
 function sanitizeInput(text) {
+  if (typeof text !== 'string') return "";
   return text
-    .replace(/<[^>]*>?/gm, "")
-    .replace(/[{}[\]();<>]/g, "")
-    .replace(/[^a-zA-Z0-9\s.,!?'-]/g, "")
+    .replace(/<[^>]*>?/gm, "")      // Strip HTML tags
+    .replace(/[{}[\]();<>]/g, "") // Remove potentially harmful characters
+    .replace(/[^a-zA-Z0-9\s.,!?'-]/g, "") // Allow basic punctuation
     .trim();
 }
 
 // -----------------------------
-// API endpoint
+// API endpoints
 // -----------------------------
 app.get("/", (req, res) => {
-  res.send("Shadows Fate AI working on this!");
+  res.send("Shadows Fate AI server is running!");
 });
 
 app.post("/query", async (req, res) => {
   try {
     const userQuery = sanitizeInput(req.body.query || "");
-    if (!userQuery) return res.status(400).json({ error: "Empty query." });
+    if (!userQuery) {
+      console.log("Empty query received.");
+      return res.status(400).json({ error: "Empty query." });
+    }
+    console.log(`Processing query: "${userQuery}"`);
 
-    // Embed query using Gemini
+    // 1. Embed query
     const { embedding } = await embeddingModel.embedContent(userQuery);
 
-    // Perform vector search
+    // 2. Perform vector search
     const aggPipeline = [
       {
         $vectorSearch: {
@@ -103,13 +114,17 @@ app.post("/query", async (req, res) => {
     ];
 
     const docs = await collection.aggregate(aggPipeline).toArray();
-    if (!docs.length)
-      return res.status(404).json({ response: "No relevant information found." });
+    
+    if (!docs.length) {
+      console.log("No relevant documents found.");
+      return res.status(404).json({ response: "I couldn't find any relevant information for that query." });
+    }
+    console.log(`Found ${docs.length} relevant documents.`);
 
-    // Combine retrieved chunks
-    const context = docs.map((d, i) => `(${i + 1}) ${d.text}`).join("\n\n");
+    // 3. Combine retrieved chunks
+    const context = docs.map((d, i) => `Source ${i + 1} (Score: ${d.score.toFixed(2)}): ${d.text}`).join("\n\n");
 
-    // Ask Gemini
+    // 4. Ask Gemini
     const chat = chatModel.startChat({
       generationConfig: {
         temperature: 0.2,
@@ -125,28 +140,29 @@ app.post("/query", async (req, res) => {
     });
 
     const ragPrompt = `
-You are a lore and gameplay expert of the Shadow Fight series.
-Use ONLY the following context to answer the user's question accurately.
+You are a helpful expert on the Shadow Fight game series.
+Your task is to answer the user's question based *only* on the context provided below.
+Do not use any outside knowledge. If the context does not contain the answer, say so.
 
-Context:
+**Context:**
+---
 ${context}
+---
 
-User question:
+**User Question:**
 "${userQuery}"
 
-Your answer must be:
-- Well formatted in Markdown (with bold headings, bullet points, and paragraphs)
-- Informative but concise
-- Never hallucinate or invent facts
+**Your Answer:**
+(Provide a clear, concise answer in Markdown format, citing sources if helpful, e.g., "According to Source 1...")
 `;
 
     const result = await chat.sendMessage(ragPrompt);
     const llmResponse = result.response.text();
-
+    console.log("Sending LLM response.");
     res.json({ response: llmResponse });
 
   } catch (err) {
-    console.error("❌ Error:", err.message);
+    console.error("❌ Error in /query endpoint:", err.message, err.stack);
     res.status(500).json({ error: "An error occurred while processing the query." });
   }
 });
@@ -154,6 +170,21 @@ Your answer must be:
 // -----------------------------
 // Server startup
 // -----------------------------
-const port = PORT || 8000;
+async function startServer() {
+  try {
+    // 1. Connect to the database
+    await connectDB();
+    
+    // 2. Start the Express server *only after* DB is connected
+    const port = PORT || 8000;
+    app.listen(port, "0.0.0.0", () => {
+      console.log(`🚀 Server listening on http://0.0.0.0:${port}`);
+    });
+  } catch (err) {
+    console.error("❌ Failed to start the server:", err.message, err.stack);
+    process.exit(1); // Exit process with failure
+  }
+}
 
-app.listen(port, "0.0.0.0", () => console.log(`Server running on port ${port}`));
+// Start the server
+startServer();
