@@ -115,14 +115,16 @@ app.post("/query", async (req, res) => {
 
     const docs = await collection.aggregate(aggPipeline).toArray();
     
-    if (!docs.length) {
-      console.log("No relevant documents found.");
-      return res.status(404).json({ response: "I couldn't find any relevant information for that query." });
-    }
-    console.log(`Found ${docs.length} relevant documents.`);
+    let context; // Define context outside the if/else
 
-    // 3. Combine retrieved chunks
-    const context = docs.map((d, i) => `Source ${i + 1} (Score: ${d.score.toFixed(2)}): ${d.text}`).join("\n\n");
+    if (!docs.length) {
+      console.log("No relevant documents found. Sending query to LLM without context.");
+      context = "No relevant context was found in the database to answer the query."; // Provide an empty context
+    } else {
+      console.log(`Found ${docs.length} relevant documents.`);
+      // 3. Combine retrieved chunks
+      context = docs.map((d, i) => `Source ${i + 1} (Score: ${d.score.toFixed(2)}): ${d.text}`).join("\n\n");
+    }
 
     // 4. Ask Gemini
     const chat = chatModel.startChat({
@@ -188,4 +190,3 @@ async function startServer() {
 
 // Start the server
 startServer();
-
