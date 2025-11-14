@@ -116,7 +116,7 @@ app.post("/query", async (req, res) => {
         $project: {
           _id: 1,
           title: 1,
-          text: 1,
+          content: 1,
           score: { $meta: "vectorSearchScore" }
         }
       }
@@ -130,7 +130,7 @@ app.post("/query", async (req, res) => {
       context = "";
     } else {
       console.log(`Found ${docs.length} relevant documents.`);
-      context = docs.map((d,i) => `Source ${i+1} (Score: ${d.score.toFixed(2)}): ${d.text}`).join("\n\n");
+      context = docs.map((d,i) => `Source ${i+1} (Score: ${d.score.toFixed(2)}): ${d.content}`).join("\n\n");
     }
 
     // --- 3. Build prompt with RAG style ---
@@ -257,3 +257,4 @@ async function startServer() {
 
 
 startServer();
+
