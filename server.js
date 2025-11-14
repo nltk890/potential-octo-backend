@@ -91,6 +91,7 @@ app.post("/query", async (req, res) => {
     const embedResp = await ai.models.embedContent({
       model: "gemini-embedding-001",
       contents: userQuery,
+      outputDimensionality: 768,
       // optional requestOptions, e.g. timeout
       requestOptions: { timeout: 30000 }
     });
@@ -257,4 +258,5 @@ async function startServer() {
 
 
 startServer();
+
 
