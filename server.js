@@ -136,7 +136,7 @@ app.post("/query", async (req, res) => {
     // --- 3. Build prompt with RAG style ---
     const ragPrompt = `
       You are a Shadow Fight expert assistant. Use the retrieved context as your factual base.
-      Follow this reasoning pipeline:
+      Follow this reasoning pipeline to answer user question(do not show steps to user):
       1. **Extract Key Facts**
         - Summarize only the relevant details from the provided context
         - Do NOT hallucinate anything not present
@@ -270,6 +270,7 @@ async function startServer() {
 
 
 startServer();
+
 
 
 
