@@ -135,9 +135,22 @@ app.post("/query", async (req, res) => {
 
     // --- 3. Build prompt with RAG style ---
     const ragPrompt = `
-      You are a helpful expert on the Shadow Fight game series.
-      Use *only* the context below to answer. If the answer isn't in the context, say no info.
+      You are a Shadow Fight expert assistant. Use the retrieved context as your factual base.
+      Follow this reasoning pipeline:
+      1. **Extract Key Facts**
+        - Summarize only the relevant details from the provided context
+        - Do NOT hallucinate anything not present
 
+      2. **Deep Reasoning**
+        - understand what user is trying to get & answer that with more explainantion with the given context
+        - Use step-by-step logic
+        - Make deductions even if not directly stated, but ONLY from the given info
+
+      3. **Final Answer (Clean & User-Friendly)**
+        - Provide a formatted, readable answer
+        - Include bullet points, highlights where useful
+        - Avoid showing your reasoning steps
+        - Avoid words like based on context instead say from my knowledge
       **Context:**
       ---
       ${context}
@@ -257,6 +270,7 @@ async function startServer() {
 
 
 startServer();
+
 
 
 
